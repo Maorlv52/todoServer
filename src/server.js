@@ -42,13 +42,13 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 1: Get all todo items
-        app.get('/todos/getAllTodos', async (req, res) => {
+        app.get('/getAllTodos', async (req, res) => {
 
             try {
                 const db = client.db();
-                const allTasks = await db.collection('Tasks').find({}).toArray()
+                const tasksInCollection = await db.collection('Tasks').find({}).toArray()
 
-                if (allTasks.length === 0) {
+                if (tasksInCollection.length === 0) {
                     res.json({
                         status: "failure",
                         result: {
@@ -56,9 +56,34 @@ async function connectToDatabase() {
                         }
                     })
                 } else {
+
+                    // const usersArr = db.collection("Users").find()
+                    const usersArr = await db.collection('Users').aggregate([{$project: {_id: 1}}]).toArray()
+                    const user_ids = usersArr.map(item => item._id.toString());
+                    let result = []
+
+
+                    for (const user of user_ids) {
+                        const userIdObj = new ObjectId(user); // Convert user ID string to ObjectId
+                        const user_task = await db.collection('Tasks').find({uId: userIdObj}).project({
+                            uId: 0,
+                            userDetails: 0
+                        }).toArray();
+                        const userName = (await db.collection("Tasks").findOne({uId: userIdObj})).userDetails.userName
+                        const userEmail = (await db.collection("Tasks").findOne({uId: userIdObj})).userDetails.userEmail
+                        const numOfTasks = (await db.collection("Users").findOne({_id: userIdObj})).numberOfTasks
+                        result.push({
+                            userName: userName,
+                            userEmail: userEmail,
+                            userId: user,
+                            numberOfTasks: numOfTasks,
+                            tasks: user_task
+                        });
+                    }
+
                     res.json({
                         status: "success",
-                        result: allTasks
+                        result: result
                     })
                 }
             } catch (error) {
@@ -70,7 +95,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 2: Get all todos for a specific user
-        app.post('/todos/getUserTodos', async (req, res) => {
+        app.post('/getUserTodos', async (req, res) => {
             const {userName, userEmail} = req.body;
 
             try {
@@ -79,14 +104,14 @@ async function connectToDatabase() {
                 // Check if the 'Tasks' collection exists
                 const tasksCollectionExists = await db.listCollections({name: 'Tasks'}).hasNext();
                 if (!tasksCollectionExists) {
-                    res.status(404).json({error: 'No tasks found'});
+                    res.status(404).json({error: '`Tasks` collection does not exist'});
                     return;
                 }
 
-                const todoCounter = await db.collection('Tasks').find({ userEmail: userEmail }).toArray();
-                const userEmailExist = (await db.collection('Tasks').findOne({userEmail: userEmail})).userEmail;
-                const userNameExist = (await db.collection('Tasks').findOne({ userName: userName }))//.newTodo.userName;
-                const userTasks = await db.collection("Tasks").find({ userEmail: userEmail }).toArray();
+                const todoCounter = await db.collection('Tasks').find({'userDetails.userEmail': userEmail}).toArray();
+                const userEmailExist = (await db.collection('Tasks').findOne({'userDetails.userEmail': userEmail})).userDetails.userEmail
+                const userNameExist = (await db.collection('Tasks').findOne({'userDetails.userName': userName}))
+                const userTasks = await db.collection("Tasks").find({'userDetails.userEmail': userEmail}).toArray();
 
 
                 if (!userNameExist) {
@@ -126,7 +151,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 3: Get a specific todo item by ID for a specific user
-        app.post('/todos/getTodoById', async (req, res) => {
+        app.post('/getTodoById', async (req, res) => {
             const {userName, userEmail, todoId} = req.body;
             try {
                 const db = client.db();
@@ -140,9 +165,9 @@ async function connectToDatabase() {
                 } else {
 
                     const objectId = new ObjectId(todoId)
-                    const userTask = await db.collection('Tasks').findOne({_id: objectId});
-                    const userNameExist = await db.collection('Tasks').findOne({userName: userName})
-                    const userEmailExist = await db.collection('Tasks').findOne({userEmail: userEmail})
+                    const userTask = (await db.collection('Tasks').findOne({_id: objectId}))
+                    const userNameExist = await db.collection('Tasks').findOne({'userDetails.userName': userName})
+                    const userEmailExist = await db.collection('Tasks').findOne({'userDetails.userEmail': userEmail})
 
                     if (!userNameExist) {
                         res.status(404).json({error: `User '${userName}' not found`});
@@ -150,7 +175,7 @@ async function connectToDatabase() {
                         res.json({
                             result: {
                                 status: "failure",
-                                desc: `no todo items with id ${todoId}`
+                                desc: `no todo item with id ${todoId}`
                             }
                         })
                     } else if (!userEmailExist) {
@@ -177,8 +202,8 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 4: Create a new todo item
-        app.post('/todos/setTodo', async (req, res) => {
-            const {userName, userEmail, todoName, deadline} = req.body;
+        app.post('/setTodo', async (req, res) => {
+            const {userName, userEmail, todoName, deadline, userPhone} = req.body;
 
             // Check if required fields are provided
             if (!userName || !userEmail || !todoName || !deadline) {
@@ -208,7 +233,12 @@ async function connectToDatabase() {
 
                 if (!existingUserInUsers) {
                     // Insert the new user into the 'Users' collection
-                    const addUser = await db.collection('Users').insertOne({userName, userEmail, numberOfTasks: 1});
+                    const addUser = await db.collection('Users').insertOne({
+                        userName,
+                        userEmail,
+                        userPhone,
+                        numberOfTasks: 1
+                    });
 
                     if (!addUser.acknowledged) {
                         res.status(500).json({error: 'Failed to create a new user'});
@@ -219,11 +249,25 @@ async function connectToDatabase() {
                     await db.collection('Users').updateOne({userEmail: userEmail}, {$inc: {numberOfTasks: 1}});
                 }
 
+                const currentDate = new Date()
+                currentDate.setHours(currentDate.getHours() + 3)
+                const cDate = currentDate.toISOString();
+
                 // Create a new todo item
-                const newTodo = {userName, userEmail, todoName, deadline, status: 'TO-DO'};
+                const newTodo = {todoName, cDate, deadline, status: 'TO-DO'};
+
+                const userID = (await db.collection("Users").findOne({userEmail: userEmail}))._id
 
                 // Insert the new todo item into the 'Tasks' collection
-                const pushTaskToDb = await db.collection('Tasks').insertMany([{ userName, userEmail, todoName, deadline, status: 'TO-DO' }]);
+                const pushTaskToDb = await db.collection('Tasks').insertMany([{
+                    uId: userID,
+                    userDetails: {userName, userEmail},
+                    todoName,
+                    cDate: cDate,
+                    deadline,
+                    status: 'TO-DO'
+                }]);
+
 
                 if (pushTaskToDb.acknowledged) {
                     newTodo.taskId = pushTaskToDb.insertedIds[0]
@@ -244,7 +288,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 5: Update an existing todo item
-        app.put('/todos/updateTodo', async (req, res) => {
+        app.put('/updateTodo', async (req, res) => {
             const {todoId, userName, userEmail, updatedTodo} = req.body;
 
             if (!todoId || !userName || !userEmail || !updatedTodo) {
@@ -301,7 +345,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 6: Delete a specific todo item
-        app.delete('/todos/deleteTodoItem', async (req, res) => {
+        app.delete('/deleteTodoItem', async (req, res) => {
             const {todoId, userName, userEmail} = req.body;
 
             if (!todoId || !userName || !userEmail) {
@@ -313,7 +357,6 @@ async function connectToDatabase() {
             try {
                 const db = client.db();
                 const objectId = new ObjectId(todoId)
-
                 const deleteResult = await db.collection('Tasks').deleteOne({_id: objectId});
 
 
@@ -348,7 +391,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 7: Delete all todos for a specific user
-        app.delete('/todos/deleteUserTodos', async (req, res) => {
+        app.delete('/deleteUserTodos', async (req, res) => {
             const {userName, userEmail} = req.body;
 
             if (!userName || !userEmail) {
@@ -360,8 +403,8 @@ async function connectToDatabase() {
             try {
                 const db = client.db();
 
-                const numOfTasksForUser = (await db.collection("Tasks").countDocuments({userEmail: userEmail}))
-                const deleteAllRecordsForUser = await db.collection('Tasks').deleteMany({userEmail: userEmail});
+                const numOfTasksForUser = (await db.collection("Tasks").countDocuments({'userDetails.userEmail': userEmail}))
+                const deleteAllRecordsForUser = await db.collection('Tasks').deleteMany({'userDetails.userEmail': userEmail});
 
 
                 if (deleteAllRecordsForUser.deletedCount > 0) {
@@ -395,7 +438,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 8: - Delete all todos for all users
-        app.delete('/todos/deleteAllTodos', async (req, res) => {
+        app.delete('/deleteAllTodos', async (req, res) => {
 
             try {
                 const db = client.db();
@@ -421,7 +464,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 9: - Delete all users from Users collection
-        app.delete(`/todos/deleteAllUsers`, async (req, res) => {
+        app.delete(`/deleteAllUsers`, async (req, res) => {
             try {
                 const db = client.db()
                 const deleteAllUsers = db.collection("Users").deleteMany({})
@@ -447,12 +490,18 @@ async function connectToDatabase() {
 
 // endpoint 10: - clear DB (Users + Tasks collections)
 
-        app.delete(`/todos/clearDB`, async (req, res) => {
+        app.delete(`/clearDB`, async (req, res) => {
             try {
                 const db = client.db()
                 const deleteAllTasks = db.collection("Tasks").deleteMany({})
                 const deleteAllUsers = db.collection("Users").deleteMany({})
 
+                if ((await deleteAllTasks).deletedCount === 0 && (await deleteAllUsers).deletedCount === 0) {
+                    res.status(400).json({
+                        message: "DB is empty :-/"
+                    })
+                    return;
+                }
 
                 if ((await deleteAllTasks).deletedCount === 0) {
                     res.status(400).json({
@@ -482,7 +531,7 @@ async function connectToDatabase() {
         /*===========================================================================*/
 
 // endpoint 11: - set config collection for all users
-        app.post('/todos/setConfig', async (req, res) => {
+        app.post('/setConfig', async (req, res) => {
             try {
                 const db = client.db(); // Get the reference to the database
 
@@ -491,12 +540,12 @@ async function connectToDatabase() {
 
                 if (collectionExists) {
                     // Update the existing collection with new parameters
-                    const updatedConfig = req.body;
-                    const result = await db.collection('configurations').updateOne({}, {$set: updatedConfig});
 
-                    if (result.modifiedCount > 0) {
-                        const updatedDocument = await db.collection('configurations').findOne({});
-                        res.status(200).json({result: updatedDocument});
+                    const result = await db.collection('configurations').insertOne(req.body);
+
+                    if (result.acknowledged > 0) {
+                        // const updatedDocument = ;
+                        res.status(200).json({result: await db.collection('configurations').findOne({})});
                     } else {
                         res.status(500).json({error: 'Failed to update the configuration'});
                     }
@@ -506,11 +555,10 @@ async function connectToDatabase() {
                     console.log('Created the configurations collection');
 
                     // Insert the new configuration document
-                    const configuration = req.body;
-                    const result = await db.collection('configurations').insertOne(configuration);
+                    const result = await db.collection('configurations').insertOne(req.body);
 
                     if (result.acknowledged) {
-                        res.status(201).json({result: configuration});
+                        res.status(201).json({result: result});
                     } else {
                         res.status(500).json({error: 'Failed to create the configuration'});
                     }
@@ -522,11 +570,32 @@ async function connectToDatabase() {
         });
 
         /*===========================================================================*/
+// endpoint 12: - reset config collection for all users
+        app.delete('/resetConfig', async (req, res) => {
+            try {
+                const db = client.db()
+                const resetConfig = await db.collection("configurations").deleteMany({})
+
+                if (resetConfig.deletedCount > 0) {
+                    res.json({message: "configurations has being reset"});
+                } else {
+                    res.status(400).json({message: "fail to reset configurations"})
+                }
+
+            } catch (error) {
+                console.error('Error reset configuration', error);
+                res.status(500).json({error: 'Failed to reset the configuration'});
+            }
+
+        })
+
 
 // Start the server
         app.listen(port, () => {
             console.log(`API server is running on http://localhost:${port}`);
         });
+
+
     } catch (error) {
         console.error('Error starting the server:', error);
     }
